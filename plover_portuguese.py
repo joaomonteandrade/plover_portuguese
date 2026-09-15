@@ -1,5 +1,59 @@
 # SKTFPLRAO*EURWBPGHTSDZ
 
+from plover import system as _plover_system
+from plover import translation as _plover_translation
+
+def _patch_asterisk_undo():
+    """
+    Mantém o '*' funcionando simultaneamente como:
+
+        *      -> undo
+        PA*G   -> sufixo {^a}
+
+    O problema é que, ao colocar '*' em SUFFIX_KEYS e criar
+    a entrada "*" -> "{^a}", o Plover encontra "*" como uma
+    tradução normal antes de processar UNDO_STROKE_STENO.
+
+    Aqui interceptamos somente o stroke EXATAMENTE igual a '*'.
+    Qualquer stroke que contenha outras teclas continua passando
+    pelo mecanismo normal de sufixação do Plover.
+    """
+
+    translator_class = _plover_translation.Translator
+
+    # Evita aplicar o patch duas vezes caso o módulo seja recarregado.
+    if getattr(translator_class, '_portuguese_asterisk_undo_patch', False):
+        return
+
+    original_translate_stroke = translator_class.translate_stroke
+
+    def translate_stroke_with_portuguese_asterisk(self, stroke):
+        # Só interfere no sistema Português.
+        #
+        # É importante usar NAME para que esse patch não altere
+        # o comportamento de outros sistemas do Plover.
+        if (
+            _plover_system.NAME == 'Portuguese Stenotype'
+            and _plover_system.UNDO_STROKE_STENO == '*'
+            and stroke.rtfcre == '*'
+        ):
+            macro = _plover_translation.Macro(
+                'undo',
+                stroke,
+                '',
+            )
+            self.translate_macro(macro)
+            return
+
+        # Todo o restante permanece exatamente como no Plover.
+        return original_translate_stroke(self, stroke)
+
+    translator_class.translate_stroke = translate_stroke_with_portuguese_asterisk
+    translator_class._portuguese_asterisk_undo_patch = True
+
+
+_patch_asterisk_undo()
+
 KEYS = (
     '#',
     'S-', 'K-', 'T-', 'F-', 'P-', 'L-', 'R-',
@@ -11,7 +65,7 @@ KEYS = (
 
 IMPLICIT_HYPHEN_KEYS = ('A-', 'O-', '-E', '-U', '*')
 
-SUFFIX_KEYS = ('-S', '-G', '-Z', '-D')
+SUFFIX_KEYS = ('-S', '-G', '-Z', '-D', '*')
 
 NUMBER_KEY = '#'
 
