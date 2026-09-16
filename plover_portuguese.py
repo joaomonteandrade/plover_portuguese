@@ -2,6 +2,7 @@
 
 from plover import system as _plover_system
 from plover import translation as _plover_translation
+from plover.steno import Stroke
 
 def _patch_asterisk_undo():
     """
@@ -52,6 +53,214 @@ def _patch_asterisk_undo():
     translator_class._portuguese_asterisk_undo_patch = True
 
 
+def _patch_skfl_suffix():
+    """
+    Adiciona o modificador SKFL para transformar a tradução de um
+    stroke em um sufixo.
+
+    Prioridade:
+
+        1. Entrada direta do stroke completo no dicionário.
+        2. Caso não exista, remove SKFL.
+        3. O stroke restante é processado pelo mecanismo NORMAL
+           do Plover.
+        4. O resultado desse processamento é transformado em sufixo.
+
+    Exemplos:
+
+        E
+        -> e
+
+        R/E
+        -> relaciono e
+
+        R/SKFLE
+        -> relacione
+
+        AR
+        -> ar
+
+        A*R
+        -> ara
+
+        R/SKFLA*R
+        -> relacionara
+
+    Restrições:
+
+        - Entradas diretas do dicionário sempre têm prioridade.
+        - SKFL sozinho não faz nada.
+        - O stroke-base não pode conter S, K, F ou L.
+        - Entradas diretas continuam podendo conter múltiplos strokes.
+        - O fallback SKFL só trabalha sobre UM stroke.
+    """
+
+    translator_class = _plover_translation.Translator
+
+    if getattr(translator_class, '_portuguese_skfl_suffix_patch', False):
+        return
+
+    original_translate_stroke = translator_class.translate_stroke
+
+    def translate_stroke_with_skfl_suffix(self, stroke):
+
+        # Só interfere no sistema Português.
+        if _plover_system.NAME == 'Portuguese Stenotype':
+
+            # =========================================================
+            # 1. PRIORIDADE ABSOLUTA:
+            #    entrada literal do stroke completo no dicionário
+            # =========================================================
+
+            try:
+                direct_mapping = self.lookup((stroke,))
+            except (KeyError, IndexError):
+                direct_mapping = None
+
+            if direct_mapping is not None:
+                return original_translate_stroke(self, stroke)
+
+            # =========================================================
+            # 2. Verifica se o stroke contém SKFL
+            # =========================================================
+
+            keys = set(stroke.steno_keys)
+
+            skfl_keys = {
+                'S-',
+                'K-',
+                'F-',
+                'L-',
+            }
+
+            if skfl_keys.issubset(keys):
+
+                # Remove SKFL.
+                remaining_keys = keys - skfl_keys
+
+                # SKFL sozinho não possui stroke-base.
+                if remaining_keys:
+
+                    # =================================================
+                    # 3. O stroke-base não pode possuir S/K/F/L
+                    # =================================================
+
+                    forbidden_keys = {
+                        'S-',
+                        'K-',
+                        'F-',
+                        'L-',
+                        '-S',
+                        '-K',
+                        '-F',
+                        '-L',
+                    }
+
+                    if not remaining_keys.intersection(forbidden_keys):
+
+                        try:
+                            base_stroke = type(stroke)(remaining_keys)
+                        except (TypeError, ValueError):
+                            base_stroke = None
+
+                        if base_stroke is not None:
+
+                            # =================================================
+                            # 4. Primeiro tenta uma entrada literal do
+                            #    stroke-base.
+                            #
+                            #    Ex.:
+                            #        E -> e
+                            # =================================================
+
+                            try:
+                                direct_base_mapping = self.lookup(
+                                    (base_stroke,)
+                                )
+                            except (KeyError, IndexError):
+                                direct_base_mapping = None
+
+                            if direct_base_mapping is not None:
+
+                                if (
+                                    isinstance(direct_base_mapping, str)
+                                    and direct_base_mapping
+                                    and not direct_base_mapping.startswith('{')
+                                ):
+                                    suffix_mapping = (
+                                        '{^' + direct_base_mapping + '}'
+                                    )
+
+                                    translation = (
+                                        _plover_translation.Translation(
+                                            [stroke],
+                                            suffix_mapping,
+                                        )
+                                    )
+
+                                    self.translate_translation(translation)
+                                    return
+
+                            # =================================================
+                            # 5. Se não existe tradução direta para o
+                            #    stroke-base, precisamos deixar o Plover
+                            #    processá-lo NORMALMENTE.
+                            #
+                            #    Isso é importante para:
+                            #
+                            #        A*R -> ara
+                            #
+                            #    pois A*R pode depender da lógica de
+                            #    SUFFIX_KEYS / autosuffix e não de uma
+                            #    entrada literal "A*R" no dicionário.
+                            # =================================================
+
+                            # Criamos um Translator auxiliar somente para
+                            # descobrir qual seria a tradução normal do
+                            # stroke-base sem emitir o resultado.
+                            #
+                            # O método _lookup não deve ser chamado aqui,
+                            # porque precisamos respeitar todas as regras
+                            # normais de tradução do Plover.
+                            try:
+                                translations = self._translate_stroke(
+                                    base_stroke
+                                )
+                            except AttributeError:
+                                translations = None
+
+                            if translations:
+
+                                # Pega a tradução resultante.
+                                mapping = translations[-1]
+
+                                if (
+                                    isinstance(mapping, str)
+                                    and mapping
+                                    and not mapping.startswith('{')
+                                ):
+
+                                    suffix_mapping = (
+                                        '{^' + mapping + '}'
+                                    )
+
+                                    translation = (
+                                        _plover_translation.Translation(
+                                            [stroke],
+                                            suffix_mapping,
+                                        )
+                                    )
+
+                                    self.translate_translation(translation)
+                                    return
+
+        # Todo o restante continua exatamente como no Plover.
+        return original_translate_stroke(self, stroke)
+
+    translator_class.translate_stroke = translate_stroke_with_skfl_suffix
+    translator_class._portuguese_skfl_suffix_patch = True
+    
+_patch_skfl_suffix()
 _patch_asterisk_undo()
 
 KEYS = (
