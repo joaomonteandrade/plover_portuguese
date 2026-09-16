@@ -8,3 +8,4 @@ Observação
 
 A forma como a teoria lida com as terminações é HORRÍVEl, eu juro que tentei o que eu pude para adaptar de forma 100% fiel, mas não dá. A apostila simplesmente não diferencia palavras de terminações, apesar de se preocupar pontualmente em criar formas especiais para algumas terminações, como "ou" que recebe o stroke O*U, e a terminação "e" que recebe a regra de repetir a última consoante.
 
+A fim de resolver conflitos, as terminações devem ser escritas com o acorde SKFL no lado esquerdo do teclado, então quando a apostila disser que "-R/AR = reclamar", entenda como "-R/SKFLAR = reclamar".
