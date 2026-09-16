@@ -3,6 +3,8 @@
 from plover import system as _plover_system
 from plover import translation as _plover_translation
 from plover.steno import Stroke
+from plover import orthography as _plover_orthography
+import re
 
 def _patch_asterisk_undo():
     """
@@ -52,212 +54,577 @@ def _patch_asterisk_undo():
     translator_class.translate_stroke = translate_stroke_with_portuguese_asterisk
     translator_class._portuguese_asterisk_undo_patch = True
 
-
 def _patch_skfl_suffix():
     """
-    Adiciona o modificador SKFL para transformar a tradução de um
-    stroke em um sufixo.
+    Adiciona SKFL como modificador de sufixo.
 
     Prioridade:
 
-        1. Entrada direta do stroke completo no dicionário.
-        2. Caso não exista, remove SKFL.
-        3. O stroke restante é processado pelo mecanismo NORMAL
+        1. Entrada literal do stroke completo no dicionário.
+        2. Remove SKFL.
+        3. Procura o stroke-base diretamente no dicionário.
+        4. Caso o stroke-base use '*', resolve pelo mecanismo normal
            do Plover.
-        4. O resultado desse processamento é transformado em sufixo.
+        5. Aplica as ORTHOGRAPHY_RULES gerais ao sufixo.
+    
+    A ortografia não depende do SKFL.
 
     Exemplos:
 
         E
-        -> e
+            -> e
 
-        R/E
-        -> relaciono e
+        SKFL E
+            -> {^e}
 
-        R/SKFLE
-        -> relacione
+        RAEUR -> {^rário}
+
+        SKFLRAEUR
+            -> {^rário}
 
         AR
-        -> ar
+            -> ar
 
         A*R
-        -> ara
+            -> ara
 
-        R/SKFLA*R
-        -> relacionara
+        SKFLA*R
+            -> {^ara}
 
-    Restrições:
+    Regra ortográfica:
 
-        - Entradas diretas do dicionário sempre têm prioridade.
-        - SKFL sozinho não faz nada.
-        - O stroke-base não pode conter S, K, F ou L.
-        - Entradas diretas continuam podendo conter múltiplos strokes.
-        - O fallback SKFL só trabalha sobre UM stroke.
+        apareço + e
+            -> aparece
+
+        apareço + i
+            -> apareci
     """
 
     translator_class = _plover_translation.Translator
 
-    if getattr(translator_class, '_portuguese_skfl_suffix_patch', False):
+    # Evita aplicar o patch duas vezes.
+    if getattr(
+        translator_class,
+        '_portuguese_skfl_suffix_patch',
+        False,
+    ):
         return
 
-    original_translate_stroke = translator_class.translate_stroke
+    original_translate_stroke = (
+        translator_class.translate_stroke
+    )
 
-    def translate_stroke_with_skfl_suffix(self, stroke):
+    def _make_suffix(mapping):
+        """
+        Converte uma tradução em um sufixo.
 
-        # Só interfere no sistema Português.
-        if _plover_system.NAME == 'Portuguese Stenotype':
+        Exemplos:
 
-            # =========================================================
-            # 1. PRIORIDADE ABSOLUTA:
-            #    entrada literal do stroke completo no dicionário
-            # =========================================================
+            e
+                -> {^e}
+
+            {^rário}
+                -> {^rário}
+
+            ar {^a}
+                -> {^ar}{^a}
+        """
+
+        if not isinstance(
+            mapping,
+            str,
+        ) or not mapping:
+            return None
+
+        # Já é um sufixo.
+        if mapping.startswith('{^'):
+            return mapping
+
+        # Texto normal + autosuffix.
+        if '{^' in mapping:
+
+            pos = mapping.find('{^')
+
+            normal_part = mapping[:pos].rstrip()
+            suffix_part = mapping[pos:]
+
+            if normal_part:
+                return (
+                    '{^'
+                    + normal_part
+                    + '}'
+                    + suffix_part
+                )
+
+            return suffix_part
+
+        # Tradução normal.
+        return '{^' + mapping + '}'
+
+    def _apply_orthography(
+        translator,
+        suffix_mapping,
+    ):
+        """
+        Aplica as ORTHOGRAPHY_RULES à palavra anterior.
+
+        A regra é mantida completamente independente do SKFL.
+
+        Exemplo:
+
+            palavra:
+                apareço
+
+            suffix:
+                {^e}
+
+            regra:
+                apareço ^ e -> aparece
+
+        O resultado será:
+
+            {#BackSpace}{^ce}
+
+        Assim:
+
+            apareço
+              ↓
+            apereço?  (não)
+              ↓
+            BackSpace remove o ç
+              ↓
+            {^ce} acrescenta "ce" sem espaço
+              ↓
+            aparece
+        """
+
+        if not isinstance(
+            suffix_mapping,
+            str,
+        ):
+            return suffix_mapping
+
+        if not suffix_mapping:
+            return suffix_mapping
+
+        # =============================================================
+        # Só trata um attach simples:
+        #
+        #     {^e}
+        #     {^i}
+        #     {^rário}
+        #
+        # Não interfere em traduções compostas como:
+        #
+        #     {^ar}{^a}
+        # =============================================================
+
+        if (
+            not suffix_mapping.startswith('{^')
+            or not suffix_mapping.endswith('}')
+            or suffix_mapping.count('{^') != 1
+        ):
+            return suffix_mapping
+
+        suffix = suffix_mapping[2:-1]
+
+        if not suffix:
+            return suffix_mapping
+
+        # =============================================================
+        # Recupera a tradução imediatamente anterior.
+        # =============================================================
+
+        previous_translations = (
+            translator._state.translations
+        )
+
+        if not previous_translations:
+            return suffix_mapping
+
+        previous = previous_translations[-1]
+
+        previous_text = previous.english
+
+        if not isinstance(
+            previous_text,
+            str,
+        ):
+            return suffix_mapping
+
+        if not previous_text:
+            return suffix_mapping
+
+        # =============================================================
+        # Obtém somente a última palavra da tradução anterior.
+        # =============================================================
+
+        words = re.findall(
+            r"[\wÀ-ÿ]+",
+            previous_text,
+            re.UNICODE,
+        )
+
+        if not words:
+            return suffix_mapping
+
+        previous_word = words[-1]
+
+        # =============================================================
+        # Monta o formato esperado por ORTHOGRAPHY_RULES:
+        #
+        #     palavra ^ sufixo
+        # =============================================================
+
+        candidate = (
+            previous_word
+            + ' ^ '
+            + suffix
+        )
+
+        corrected = candidate
+
+        # =============================================================
+        # Executa as regras na ordem em que foram configuradas.
+        # =============================================================
+
+        for pattern, replacement in (
+            _plover_system.ORTHOGRAPHY_RULES
+        ):
 
             try:
-                direct_mapping = self.lookup((stroke,))
-            except (KeyError, IndexError):
-                direct_mapping = None
+                new_value = re.sub(
+                    pattern,
+                    replacement,
+                    corrected,
+                )
+            except re.error:
+                continue
 
-            if direct_mapping is not None:
-                return original_translate_stroke(self, stroke)
+            if new_value != corrected:
+                corrected = new_value
+                break
 
-            # =========================================================
-            # 2. Verifica se o stroke contém SKFL
-            # =========================================================
+        else:
+            # Nenhuma regra foi aplicada.
+            return suffix_mapping
 
-            keys = set(stroke.steno_keys)
+        # =============================================================
+        # O replacement da regra normalmente produz a palavra final.
+        #
+        # Exemplo:
+        #
+        #     apareço ^ e
+        #
+        #     ->
+        #
+        #     aparece
+        # =============================================================
 
-            skfl_keys = {
-                'S-',
-                'K-',
-                'F-',
-                'L-',
-            }
+        corrected_word = corrected.strip()
 
-            if skfl_keys.issubset(keys):
+        if not corrected_word:
+            return suffix_mapping
 
-                # Remove SKFL.
-                remaining_keys = keys - skfl_keys
+        # =============================================================
+        # Descobre o maior prefixo em comum entre:
+        #
+        #     apareço
+        #
+        # e:
+        #
+        #     aparece
+        #
+        # resultado:
+        #
+        #     "apare"
+        #
+        # Então:
+        #
+        #     apagar: ç
+        #     inserir: ce
+        # =============================================================
 
-                # SKFL sozinho não possui stroke-base.
-                if remaining_keys:
+        common_length = 0
 
-                    # =================================================
-                    # 3. O stroke-base não pode possuir S/K/F/L
-                    # =================================================
+        max_common = min(
+            len(previous_word),
+            len(corrected_word),
+        )
 
-                    forbidden_keys = {
-                        'S-',
-                        'K-',
-                        'F-',
-                        'L-',
-                        '-S',
-                        '-K',
-                        '-F',
-                        '-L',
-                    }
+        while (
+            common_length < max_common
+            and previous_word[common_length]
+            == corrected_word[common_length]
+        ):
+            common_length += 1
 
-                    if not remaining_keys.intersection(forbidden_keys):
+        chars_to_delete = (
+            len(previous_word)
+            - common_length
+        )
 
-                        try:
-                            base_stroke = type(stroke)(remaining_keys)
-                        except (TypeError, ValueError):
-                            base_stroke = None
+        text_to_append = (
+            corrected_word[common_length:]
+        )
 
-                        if base_stroke is not None:
+        # =============================================================
+        # IMPORTANTE:
+        #
+        # A parte nova precisa continuar sendo ATTACH.
+        #
+        # Antes estávamos retornando:
+        #
+        #     {#BackSpace}ce
+        #
+        # "ce" era texto normal e por isso o Plover colocava espaço.
+        #
+        # Agora:
+        #
+        #     {#BackSpace}{^ce}
+        #
+        # o "ce" continua anexado à palavra.
+        # =============================================================
 
-                            # =================================================
-                            # 4. Primeiro tenta uma entrada literal do
-                            #    stroke-base.
-                            #
-                            #    Ex.:
-                            #        E -> e
-                            # =================================================
+        replacement = (
+            '{#BackSpace}' * chars_to_delete
+            + '{^'
+            + text_to_append
+            + '}'
+        )
 
-                            try:
-                                direct_base_mapping = self.lookup(
-                                    (base_stroke,)
-                                )
-                            except (KeyError, IndexError):
-                                direct_base_mapping = None
+        return replacement
 
-                            if direct_base_mapping is not None:
+    def translate_stroke_with_skfl_suffix(
+        self,
+        stroke,
+    ):
 
-                                if (
-                                    isinstance(direct_base_mapping, str)
-                                    and direct_base_mapping
-                                    and not direct_base_mapping.startswith('{')
-                                ):
-                                    suffix_mapping = (
-                                        '{^' + direct_base_mapping + '}'
-                                    )
+        # =============================================================
+        # Só interfere no sistema Português.
+        # =============================================================
 
-                                    translation = (
-                                        _plover_translation.Translation(
-                                            [stroke],
-                                            suffix_mapping,
-                                        )
-                                    )
+        if _plover_system.NAME != 'Portuguese Stenotype':
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
 
-                                    self.translate_translation(translation)
-                                    return
+        # =============================================================
+        # 1. PRIORIDADE ABSOLUTA:
+        #
+        # Entrada literal do stroke completo.
+        # =============================================================
 
-                            # =================================================
-                            # 5. Se não existe tradução direta para o
-                            #    stroke-base, precisamos deixar o Plover
-                            #    processá-lo NORMALMENTE.
-                            #
-                            #    Isso é importante para:
-                            #
-                            #        A*R -> ara
-                            #
-                            #    pois A*R pode depender da lógica de
-                            #    SUFFIX_KEYS / autosuffix e não de uma
-                            #    entrada literal "A*R" no dicionário.
-                            # =================================================
+        direct_mapping = self.lookup(
+            (stroke,)
+        )
 
-                            # Criamos um Translator auxiliar somente para
-                            # descobrir qual seria a tradução normal do
-                            # stroke-base sem emitir o resultado.
-                            #
-                            # O método _lookup não deve ser chamado aqui,
-                            # porque precisamos respeitar todas as regras
-                            # normais de tradução do Plover.
-                            try:
-                                translations = self._translate_stroke(
-                                    base_stroke
-                                )
-                            except AttributeError:
-                                translations = None
+        if direct_mapping is not None:
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
 
-                            if translations:
+        # =============================================================
+        # 2. Identifica SKFL.
+        # =============================================================
 
-                                # Pega a tradução resultante.
-                                mapping = translations[-1]
+        keys = set(
+            stroke.steno_keys
+        )
 
-                                if (
-                                    isinstance(mapping, str)
-                                    and mapping
-                                    and not mapping.startswith('{')
-                                ):
+        skfl_keys = {
+            'S-',
+            'K-',
+            'F-',
+            'L-',
+        }
 
-                                    suffix_mapping = (
-                                        '{^' + mapping + '}'
-                                    )
+        if not skfl_keys.issubset(keys):
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
 
-                                    translation = (
-                                        _plover_translation.Translation(
-                                            [stroke],
-                                            suffix_mapping,
-                                        )
-                                    )
+        # =============================================================
+        # 3. Remove SKFL.
+        # =============================================================
 
-                                    self.translate_translation(translation)
-                                    return
+        remaining_keys = (
+            keys - skfl_keys
+        )
 
-        # Todo o restante continua exatamente como no Plover.
-        return original_translate_stroke(self, stroke)
+        if not remaining_keys:
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
 
-    translator_class.translate_stroke = translate_stroke_with_skfl_suffix
+        # =============================================================
+        # 4. Não permite S/K/F/L no stroke-base.
+        # =============================================================
+
+        forbidden_keys = {
+            'S-',
+            'K-',
+            'F-',
+            'L-',
+            '-S',
+            '-K',
+            '-F',
+            '-L',
+        }
+
+        if remaining_keys.intersection(
+            forbidden_keys
+        ):
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
+
+        # =============================================================
+        # 5. Reconstrói o stroke-base.
+        # =============================================================
+
+        try:
+            base_stroke = type(stroke)(
+                remaining_keys
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return original_translate_stroke(
+                self,
+                stroke,
+            )
+
+        # =============================================================
+        # 6. Procura entrada direta.
+        # =============================================================
+
+        direct_base_mapping = self.lookup(
+            (base_stroke,)
+        )
+
+        if direct_base_mapping is not None:
+
+            suffix_mapping = _make_suffix(
+                direct_base_mapping
+            )
+
+            if suffix_mapping is None:
+                return original_translate_stroke(
+                    self,
+                    stroke,
+                )
+
+            # Aplica ORTHOGRAPHY_RULES.
+            suffix_mapping = _apply_orthography(
+                self,
+                suffix_mapping,
+            )
+
+            translation = (
+                _plover_translation.Translation(
+                    [stroke],
+                    suffix_mapping,
+                )
+            )
+
+            self.translate_translation(
+                translation
+            )
+
+            return
+
+        # =============================================================
+        # 7. Caso especial para strokes que usam '*'.
+        #
+        # Exemplo:
+        #
+        #     A*R -> ara
+        # =============================================================
+
+        if '*' in base_stroke.rtfcre:
+
+            try:
+                max_len = (
+                    self._dictionary.longest_key
+                )
+
+                mapping = (
+                    self._lookup_with_prefix(
+                        max_len,
+                        self._state.translations,
+                        [base_stroke],
+                    )
+                )
+
+                if mapping is None:
+
+                    t = self._find_longest_match(
+                        1,
+                        max_len,
+                        base_stroke,
+                        _plover_system.SUFFIX_KEYS,
+                    )
+
+                    if t is not None:
+                        mapping = t.english
+
+            except (
+                AttributeError,
+                TypeError,
+                KeyError,
+                IndexError,
+            ):
+                mapping = None
+
+            if mapping is not None:
+
+                suffix_mapping = _make_suffix(
+                    mapping
+                )
+
+                if suffix_mapping is not None:
+
+                    # Aplica ORTHOGRAPHY_RULES.
+                    suffix_mapping = (
+                        _apply_orthography(
+                            self,
+                            suffix_mapping,
+                        )
+                    )
+
+                    translation = (
+                        _plover_translation.Translation(
+                            [stroke],
+                            suffix_mapping,
+                        )
+                    )
+
+                    self.translate_translation(
+                        translation
+                    )
+
+                    return
+
+        # =============================================================
+        # 8. Não conseguiu resolver SKFL.
+        # =============================================================
+
+        return original_translate_stroke(
+            self,
+            stroke,
+        )
+
+    translator_class.translate_stroke = (
+        translate_stroke_with_skfl_suffix
+    )
+
     translator_class._portuguese_skfl_suffix_patch = True
     
 _patch_skfl_suffix()
@@ -294,10 +661,23 @@ NUMBERS = {
 UNDO_STROKE_STENO = '*'
 
 ORTHOGRAPHY_RULES = [
+    # Ç + E -> C + E
+    (
+        r'^(.+)ç \^ e$',
+        r'\1ce',
+    ),
+
+    # Ç + I -> C + I
+    (
+        r'^(.+)ç \^ i$',
+        r'\1ci',
+    ),
+
     # Collapse vowels in suffixes
-    # como + endo = comendo
-    # cai + iria = cairia
-    (r'^(.+)[aeouiáéíóúãõâêôàü] \^ ([aeouiáéíóúãõâêôàü]\w*)$', r'\1\2'),
+    (
+        r'^(.+)[aeouiáéíóúãõâêôàü] \^ ([aeouiáéíóúãõâêôàü]\w*)$',
+        r'\1\2',
+    ),
 ]
 
 ORTHOGRAPHY_RULES_ALIASES = {}
