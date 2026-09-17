@@ -65,9 +65,7 @@ def _patch_skfl_suffix():
         3. Procura o stroke-base diretamente no dicionário.
         4. Caso o stroke-base use '*', resolve pelo mecanismo normal
            do Plover.
-        5. Aplica as ORTHOGRAPHY_RULES gerais ao sufixo.
-    
-    A ortografia não depende do SKFL.
+        5. Converte o resultado em attach.
 
     Exemplos:
 
@@ -77,7 +75,8 @@ def _patch_skfl_suffix():
         SKFL E
             -> {^e}
 
-        RAEUR -> {^rário}
+        RAEUR
+            -> {^rário}
 
         SKFLRAEUR
             -> {^rário}
@@ -90,19 +89,10 @@ def _patch_skfl_suffix():
 
         SKFLA*R
             -> {^ara}
-
-    Regra ortográfica:
-
-        apareço + e
-            -> aparece
-
-        apareço + i
-            -> apareci
     """
 
     translator_class = _plover_translation.Translator
 
-    # Evita aplicar o patch duas vezes.
     if getattr(
         translator_class,
         '_portuguese_skfl_suffix_patch',
@@ -116,7 +106,7 @@ def _patch_skfl_suffix():
 
     def _make_suffix(mapping):
         """
-        Converte uma tradução em um sufixo.
+        Converte uma tradução em attach.
 
         Exemplos:
 
@@ -136,13 +126,12 @@ def _patch_skfl_suffix():
         ) or not mapping:
             return None
 
-        # Já é um sufixo.
+        # Já é attach.
         if mapping.startswith('{^'):
             return mapping
 
-        # Texto normal + autosuffix.
+        # Texto normal + attach.
         if '{^' in mapping:
-
             pos = mapping.find('{^')
 
             normal_part = mapping[:pos].rstrip()
@@ -158,248 +147,65 @@ def _patch_skfl_suffix():
 
             return suffix_part
 
-        # Tradução normal.
-        return '{^' + mapping + '}'
-
-    def _apply_orthography(
-        translator,
-        suffix_mapping,
-    ):
-        """
-        Aplica as ORTHOGRAPHY_RULES à palavra anterior.
-
-        A regra é mantida completamente independente do SKFL.
-
-        Exemplo:
-
-            palavra:
-                apareço
-
-            suffix:
-                {^e}
-
-            regra:
-                apareço ^ e -> aparece
-
-        O resultado será:
-
-            {#BackSpace}{^ce}
-
-        Assim:
-
-            apareço
-              ↓
-            apereço?  (não)
-              ↓
-            BackSpace remove o ç
-              ↓
-            {^ce} acrescenta "ce" sem espaço
-              ↓
-            aparece
-        """
-
-        if not isinstance(
-            suffix_mapping,
-            str,
-        ):
-            return suffix_mapping
-
-        if not suffix_mapping:
-            return suffix_mapping
-
-        # =============================================================
-        # Só trata um attach simples:
-        #
-        #     {^e}
-        #     {^i}
-        #     {^rário}
-        #
-        # Não interfere em traduções compostas como:
-        #
-        #     {^ar}{^a}
-        # =============================================================
-
-        if (
-            not suffix_mapping.startswith('{^')
-            or not suffix_mapping.endswith('}')
-            or suffix_mapping.count('{^') != 1
-        ):
-            return suffix_mapping
-
-        suffix = suffix_mapping[2:-1]
-
-        if not suffix:
-            return suffix_mapping
-
-        # =============================================================
-        # Recupera a tradução imediatamente anterior.
-        # =============================================================
-
-        previous_translations = (
-            translator._state.translations
-        )
-
-        if not previous_translations:
-            return suffix_mapping
-
-        previous = previous_translations[-1]
-
-        previous_text = previous.english
-
-        if not isinstance(
-            previous_text,
-            str,
-        ):
-            return suffix_mapping
-
-        if not previous_text:
-            return suffix_mapping
-
-        # =============================================================
-        # Obtém somente a última palavra da tradução anterior.
-        # =============================================================
-
-        words = re.findall(
-            r"[\wÀ-ÿ]+",
-            previous_text,
-            re.UNICODE,
-        )
-
-        if not words:
-            return suffix_mapping
-
-        previous_word = words[-1]
-
-        # =============================================================
-        # Monta o formato esperado por ORTHOGRAPHY_RULES:
-        #
-        #     palavra ^ sufixo
-        # =============================================================
-
-        candidate = (
-            previous_word
-            + ' ^ '
-            + suffix
-        )
-
-        corrected = candidate
-
-        # =============================================================
-        # Executa as regras na ordem em que foram configuradas.
-        # =============================================================
-
-        for pattern, replacement in (
-            _plover_system.ORTHOGRAPHY_RULES
-        ):
-
-            try:
-                new_value = re.sub(
-                    pattern,
-                    replacement,
-                    corrected,
-                )
-            except re.error:
-                continue
-
-            if new_value != corrected:
-                corrected = new_value
-                break
-
-        else:
-            # Nenhuma regra foi aplicada.
-            return suffix_mapping
-
-        # =============================================================
-        # O replacement da regra normalmente produz a palavra final.
-        #
-        # Exemplo:
-        #
-        #     apareço ^ e
-        #
-        #     ->
-        #
-        #     aparece
-        # =============================================================
-
-        corrected_word = corrected.strip()
-
-        if not corrected_word:
-            return suffix_mapping
-
-        # =============================================================
-        # Descobre o maior prefixo em comum entre:
-        #
-        #     apareço
-        #
-        # e:
-        #
-        #     aparece
-        #
-        # resultado:
-        #
-        #     "apare"
-        #
-        # Então:
-        #
-        #     apagar: ç
-        #     inserir: ce
-        # =============================================================
-
-        common_length = 0
-
-        max_common = min(
-            len(previous_word),
-            len(corrected_word),
-        )
-
-        while (
-            common_length < max_common
-            and previous_word[common_length]
-            == corrected_word[common_length]
-        ):
-            common_length += 1
-
-        chars_to_delete = (
-            len(previous_word)
-            - common_length
-        )
-
-        text_to_append = (
-            corrected_word[common_length:]
-        )
-
-        # =============================================================
-        # IMPORTANTE:
-        #
-        # A parte nova precisa continuar sendo ATTACH.
-        #
-        # Antes estávamos retornando:
-        #
-        #     {#BackSpace}ce
-        #
-        # "ce" era texto normal e por isso o Plover colocava espaço.
-        #
-        # Agora:
-        #
-        #     {#BackSpace}{^ce}
-        #
-        # o "ce" continua anexado à palavra.
-        # =============================================================
-
-        replacement = (
-            '{#BackSpace}' * chars_to_delete
-            + '{^'
-            + text_to_append
+        # Texto normal.
+        return (
+            '{^'
+            + mapping
             + '}'
         )
 
-        return replacement
+    def _resolve_base_with_asterisk(
+        translator,
+        base_stroke,
+    ):
+        """
+        Resolve strokes que dependem do mecanismo normal de '*'.
+
+        Exemplo:
+
+            A*R -> ara
+        """
+
+        try:
+            max_len = (
+                translator._dictionary.longest_key
+            )
+
+            mapping = (
+                translator._lookup_with_prefix(
+                    max_len,
+                    translator._state.translations,
+                    [base_stroke],
+                )
+            )
+
+            if mapping is None:
+                t = translator._find_longest_match(
+                    1,
+                    max_len,
+                    base_stroke,
+                    tuple(
+                        _plover_system.SUFFIX_KEYS
+                    ),
+                )
+
+                if t is not None:
+                    mapping = t.english
+
+            return mapping
+
+        except (
+            AttributeError,
+            TypeError,
+            KeyError,
+            IndexError,
+        ):
+            return None
 
     def translate_stroke_with_skfl_suffix(
         self,
         stroke,
     ):
-
         # =============================================================
         # Só interfere no sistema Português.
         # =============================================================
@@ -413,7 +219,8 @@ def _patch_skfl_suffix():
         # =============================================================
         # 1. PRIORIDADE ABSOLUTA:
         #
-        # Entrada literal do stroke completo.
+        # Se o stroke completo existir no dicionário,
+        # deixa o dicionário vencer.
         # =============================================================
 
         direct_mapping = self.lookup(
@@ -492,6 +299,7 @@ def _patch_skfl_suffix():
             base_stroke = type(stroke)(
                 remaining_keys
             )
+
         except (
             TypeError,
             ValueError,
@@ -502,7 +310,13 @@ def _patch_skfl_suffix():
             )
 
         # =============================================================
-        # 6. Procura entrada direta.
+        # 6. Entrada direta no dicionário.
+        #
+        # Exemplos:
+        #
+        #     E -> e
+        #     AR -> ar
+        #     RAEUR -> {^rário}
         # =============================================================
 
         direct_base_mapping = self.lookup(
@@ -510,7 +324,6 @@ def _patch_skfl_suffix():
         )
 
         if direct_base_mapping is not None:
-
             suffix_mapping = _make_suffix(
                 direct_base_mapping
             )
@@ -520,12 +333,6 @@ def _patch_skfl_suffix():
                     self,
                     stroke,
                 )
-
-            # Aplica ORTHOGRAPHY_RULES.
-            suffix_mapping = _apply_orthography(
-                self,
-                suffix_mapping,
-            )
 
             translation = (
                 _plover_translation.Translation(
@@ -541,64 +348,28 @@ def _patch_skfl_suffix():
             return
 
         # =============================================================
-        # 7. Caso especial para strokes que usam '*'.
+        # 7. Caso especial:
         #
-        # Exemplo:
+        # O stroke-base contém '*'.
+        #
+        # Exemplos:
         #
         #     A*R -> ara
+        #     SKFLA*R -> {^ara}
         # =============================================================
 
         if '*' in base_stroke.rtfcre:
-
-            try:
-                max_len = (
-                    self._dictionary.longest_key
-                )
-
-                mapping = (
-                    self._lookup_with_prefix(
-                        max_len,
-                        self._state.translations,
-                        [base_stroke],
-                    )
-                )
-
-                if mapping is None:
-
-                    t = self._find_longest_match(
-                        1,
-                        max_len,
-                        base_stroke,
-                        _plover_system.SUFFIX_KEYS,
-                    )
-
-                    if t is not None:
-                        mapping = t.english
-
-            except (
-                AttributeError,
-                TypeError,
-                KeyError,
-                IndexError,
-            ):
-                mapping = None
+            mapping = _resolve_base_with_asterisk(
+                self,
+                base_stroke,
+            )
 
             if mapping is not None:
-
                 suffix_mapping = _make_suffix(
                     mapping
                 )
 
                 if suffix_mapping is not None:
-
-                    # Aplica ORTHOGRAPHY_RULES.
-                    suffix_mapping = (
-                        _apply_orthography(
-                            self,
-                            suffix_mapping,
-                        )
-                    )
-
                     translation = (
                         _plover_translation.Translation(
                             [stroke],
@@ -626,7 +397,281 @@ def _patch_skfl_suffix():
     )
 
     translator_class._portuguese_skfl_suffix_patch = True
-    
+
+
+def _patch_orthography_rules():
+    """
+    Faz o attach do Plover aplicar ORTHOGRAPHY_RULES antes que
+    a Action seja finalizada e registrada no contexto.
+
+    A lógica é geral e não depende de SKFL.
+
+    Exemplos:
+
+        apareço + {^e}
+            -> aparece
+
+        apareço + {^i}
+            -> apareci
+
+    O patch altera somente o _meta_to_action do módulo
+    plover.formatting, sem modificar os arquivos do Plover.
+    """
+
+    import plover.formatting as _plover_formatting
+
+    # =============================================================
+    # Remove o patch antigo que atuava em _translation_to_actions.
+    #
+    # Isso é importante porque versões anteriores desta função
+    # instalavam um patch em uma camada posterior do formatter.
+    # =============================================================
+
+    old_translation_patch = getattr(
+        _plover_formatting,
+        '_portuguese_orthography_patch_state',
+        None,
+    )
+
+    if old_translation_patch is not None:
+        _plover_formatting._translation_to_actions = (
+            old_translation_patch['original']
+        )
+
+        try:
+            delattr(
+                _plover_formatting,
+                '_portuguese_orthography_patch_state',
+            )
+        except AttributeError:
+            pass
+
+    # =============================================================
+    # Se este novo patch já estiver instalado, não empilha outro.
+    # =============================================================
+
+    old_meta_patch = getattr(
+        _plover_formatting,
+        '_portuguese_orthography_meta_patch_state',
+        None,
+    )
+
+    if old_meta_patch is not None:
+        _plover_formatting._meta_to_action = (
+            old_meta_patch['original']
+        )
+
+    original_meta_to_action = (
+        _plover_formatting._meta_to_action
+    )
+
+    # =============================================================
+    # Obtém diretamente o meta `attach` original.
+    #
+    # O _meta_to_action do Plover faz exatamente:
+    #
+    #     meta_fn(ctx, meta_arg)
+    #
+    # Portanto podemos executar o attach normal e corrigir a
+    # Action imediatamente, antes do _finalize_action().
+    # =============================================================
+
+    meta_name, _ = _plover_formatting._parse_meta(
+        '^e'
+    )
+
+    # Não usamos o valor acima para a lógica; ele apenas garante
+    # que _parse_meta continua disponível nesta versão do Plover.
+
+    attach_plugin = (
+        _plover_formatting.registry.get_plugin(
+            'meta',
+            'attach',
+        )
+    )
+
+    original_attach = attach_plugin.obj
+
+    # =============================================================
+    # Aplica ORTHOGRAPHY_RULES.
+    # =============================================================
+
+    def _apply_rules(
+        word,
+        suffix,
+    ):
+        """
+        Aplica ORTHOGRAPHY_RULES à combinação:
+
+            palavra ^ sufixo
+
+        Retorna a forma corrigida ou None.
+        """
+
+        if not isinstance(
+            word,
+            str,
+        ) or not word:
+            return None
+
+        if not isinstance(
+            suffix,
+            str,
+        ) or not suffix:
+            return None
+
+        # Algumas versões/fluxos podem fornecer o argumento
+        # do attach incluindo o ^ inicial.
+        if suffix.startswith('^'):
+            suffix = suffix[1:]
+
+        if not suffix:
+            return None
+
+        candidate = (
+            word
+            + ' ^ '
+            + suffix
+        )
+
+        for pattern, replacement in (
+            _plover_system.ORTHOGRAPHY_RULES
+        ):
+            try:
+                corrected = re.sub(
+                    pattern,
+                    replacement,
+                    candidate,
+                )
+            except re.error:
+                continue
+
+            if corrected != candidate:
+                return corrected.strip()
+
+        return None
+
+    # =============================================================
+    # Intercepta somente o meta `attach`.
+    #
+    # Todos os outros metas continuam exatamente como no Plover.
+    # =============================================================
+
+    def _meta_to_action_with_portuguese_orthography(
+        meta,
+        ctx,
+    ):
+        meta_name, meta_arg = (
+            _plover_formatting._parse_meta(meta)
+        )
+
+        # ---------------------------------------------------------
+        # Outros sistemas ou outros metas:
+        # comportamento original.
+        # ---------------------------------------------------------
+
+        if (
+            _plover_system.NAME
+            != 'Portuguese Stenotype'
+            or meta_name != 'attach'
+        ):
+            return original_meta_to_action(
+                meta,
+                ctx,
+            )
+
+        # ---------------------------------------------------------
+        # Executa o attach ORIGINAL.
+        #
+        # Neste momento a Action ainda não foi finalizada e
+        # ainda não foi passada para ctx.translated().
+        # ---------------------------------------------------------
+
+        action = original_attach(
+            ctx,
+            meta_arg,
+        )
+
+        # ---------------------------------------------------------
+        # Descobre a última palavra antes deste attach.
+        #
+        # Como o _meta_to_action é chamado antes de
+        # ctx.translated(action), ela ainda é a palavra anterior.
+        # ---------------------------------------------------------
+
+        previous_words = ctx.last_words(
+            count=1,
+            strip=True,
+        )
+
+        if not previous_words:
+            return action
+
+        current_word = previous_words[0]
+
+        if not current_word:
+            return action
+
+        # ---------------------------------------------------------
+        # Normaliza somente o ^ inicial do argumento.
+        # ---------------------------------------------------------
+
+        suffix = meta_arg
+
+        if isinstance(
+            suffix,
+            str,
+        ) and suffix.startswith('^'):
+            suffix = suffix[1:]
+
+        # ---------------------------------------------------------
+        # Aplica as regras.
+        # ---------------------------------------------------------
+
+        corrected_word = _apply_rules(
+            current_word,
+            suffix,
+        )
+
+        # ---------------------------------------------------------
+        # Nenhuma regra aplicável:
+        # mantém exatamente a Action criada pelo Plover.
+        # ---------------------------------------------------------
+
+        if corrected_word is None:
+            return action
+
+        # ---------------------------------------------------------
+        # A regra foi aplicada.
+        #
+        # Corrige a Action ANTES de _finalize_action().
+        # ---------------------------------------------------------
+
+        action.prev_replace = current_word
+        action.prev_attach = True
+        action.text = corrected_word
+        action.word = corrected_word
+        action.orthography = True
+
+        return action
+
+    # =============================================================
+    # Instala o patch.
+    # =============================================================
+
+    _plover_formatting._meta_to_action = (
+        _meta_to_action_with_portuguese_orthography
+    )
+
+    # =============================================================
+    # Guarda o original para futuros reloads.
+    # =============================================================
+
+    _plover_formatting._portuguese_orthography_meta_patch_state = {
+        'original': original_meta_to_action,
+    }
+
+_patch_orthography_rules()
 _patch_skfl_suffix()
 _patch_asterisk_undo()
 
@@ -660,25 +705,22 @@ NUMBERS = {
 
 UNDO_STROKE_STENO = '*'
 
+
 ORTHOGRAPHY_RULES = [
-    # Ç + E -> C + E
     (
-        r'^(.+)ç \^ e$',
+        r'^(.+)ço \^ e$',
         r'\1ce',
     ),
-
-    # Ç + I -> C + I
     (
-        r'^(.+)ç \^ i$',
+        r'^(.+)ço \^ i$',
         r'\1ci',
     ),
-
-    # Collapse vowels in suffixes
     (
         r'^(.+)[aeouiáéíóúãõâêôàü] \^ ([aeouiáéíóúãõâêôàü]\w*)$',
         r'\1\2',
     ),
 ]
+
 
 ORTHOGRAPHY_RULES_ALIASES = {}
 
