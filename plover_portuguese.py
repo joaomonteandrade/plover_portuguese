@@ -708,12 +708,8 @@ UNDO_STROKE_STENO = '*'
 
 ORTHOGRAPHY_RULES = [
     (
-        r'^(.+)ço \^ e$',
-        r'\1ce',
-    ),
-    (
-        r'^(.+)ço \^ i$',
-        r'\1ci',
+        r'^(.+)ço \^ ([ei]\w*)$',
+        r'\1c\2',
     ),
     (
         r'^(.+)[aeouiáéíóúãõâêôàü] \^ ([aeouiáéíóúãõâêôàü]\w*)$',
